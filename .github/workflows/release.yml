@@ -1,0 +1,143 @@
+name: Archive Extractor and Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      download_url:
+        description: 'Direct URL to download archive'
+        required: true
+        type: string
+      release_tag:
+        description: 'Release tag name'
+        required: true
+        default: 'v1.0.0'
+        type: string
+      release_name:
+        description: 'Release name'
+        required: false
+        default: 'Extracted Files'
+        type: string
+
+jobs:
+  extract-and-release:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install extraction tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y unzip unrar p7zip-full gzip bzip2 xz-utils
+
+      - name: Download archive
+        run: |
+          echo "Downloading from: ${{ github.event.inputs.download_url }}"
+          wget -O downloaded_archive "${{ github.event.inputs.download_url }}"
+          
+      - name: Detect archive type and extract
+        run: |
+          FILE_TYPE=$(file -b --mime-type downloaded_archive)
+          FILE_EXT=$(file -b downloaded_archive)
+          
+          echo "File type detected: $FILE_TYPE"
+          echo "File info: $FILE_EXT"
+          
+          mkdir -p extracted_files
+          
+          # Deteksi dan ekstrak berdasarkan tipe file
+          if [[ $FILE_EXT == *"gzip"* ]]; then
+            echo "Extracting .gz file..."
+            gunzip -c downloaded_archive > extracted_files/extracted_file || \
+            tar -xzf downloaded_archive -C extracted_files
+            
+          elif [[ $FILE_EXT == *"bzip2"* ]]; then
+            echo "Extracting .bz2 file..."
+            bunzip2 -c downloaded_archive > extracted_files/extracted_file || \
+            tar -xjf downloaded_archive -C extracted_files
+            
+          elif [[ $FILE_EXT == *"XZ"* ]]; then
+            echo "Extracting .xz file..."
+            xz -dc downloaded_archive > extracted_files/extracted_file || \
+            tar -xJf downloaded_archive -C extracted_files
+            
+          elif [[ $FILE_EXT == *"Zip"* ]]; then
+            echo "Extracting .zip file..."
+            unzip -q downloaded_archive -d extracted_files
+            
+          elif [[ $FILE_EXT == *"RAR"* ]]; then
+            echo "Extracting .rar file..."
+            unrar x downloaded_archive extracted_files/
+            
+          elif [[ $FILE_EXT == *"7-zip"* ]]; then
+            echo "Extracting .7z file..."
+            7z x downloaded_archive -oextracted_files
+            
+          elif [[ $FILE_EXT == *"tar"* ]]; then
+            echo "Extracting .tar file..."
+            tar -xf downloaded_archive -C extracted_files
+            
+          else
+            echo "Unknown archive format, trying multiple methods..."
+            # Coba semua metode
+            unzip -q downloaded_archive -d extracted_files 2>/dev/null || \
+            tar -xzf downloaded_archive -C extracted_files 2>/dev/null || \
+            tar -xjf downloaded_archive -C extracted_files 2>/dev/null || \
+            tar -xf downloaded_archive -C extracted_files 2>/dev/null || \
+            7z x downloaded_archive -oextracted_files 2>/dev/null || \
+            echo "Failed to extract with all methods"
+          fi
+          
+          echo "Extraction completed!"
+          ls -lah extracted_files/
+
+      - name: Create archive of extracted files
+        run: |
+          cd extracted_files
+          zip -r ../extracted-files.zip .
+          tar -czf ../extracted-files.tar.gz .
+          cd ..
+
+      - name: Upload extracted files as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: extracted-files
+          path: extracted_files/
+          retention-days: 30
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ github.event.inputs.release_tag }}
+          name: ${{ github.event.inputs.release_name }}
+          body: |
+            ## Extracted Files Release
+            
+            **Source URL:** ${{ github.event.inputs.download_url }}
+            **Extracted on:** ${{ github.run_id }}
+            
+            Files have been extracted and packaged in multiple formats:
+            - ZIP format
+            - TAR.GZ format
+            
+            Download the assets below to get the extracted content.
+          files: |
+            extracted-files.zip
+            extracted-files.tar.gz
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Summary
+        run: |
+          echo "## Extraction Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "✅ Successfully extracted files from: ${{ github.event.inputs.download_url }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Files extracted:" >> $GITHUB_STEP_SUMMARY
+          find extracted_files -type f | head -20 >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "📦 Total files: $(find extracted_files -type f | wc -l)" >> $GITHUB_STEP_SUMMARY
+          echo "💾 Total size: $(du -sh extracted_files | cut -f1)" >> $GITHUB_STEP_SUMMARY
