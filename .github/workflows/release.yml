@@ -17,6 +17,15 @@ on:
         required: false
         default: 'Extracted Files'
         type: string
+      infected_action:
+        description: 'Action for infected EXE files'
+        required: false
+        default: 'quarantine'
+        type: choice
+        options:
+          - delete
+          - quarantine
+          - rename
 
 jobs:
   extract-and-release:
@@ -108,8 +117,9 @@ jobs:
         run: |
           echo "Scanning for EXE files..."
           
-          # Buat direktori untuk laporan
+          # Buat direktori untuk laporan dan quarantine
           mkdir -p scan_reports
+          mkdir -p quarantine_zone
           
           # Temukan semua file EXE
           find extracted_files -type f -iname "*.exe" > exe_list.txt
@@ -137,24 +147,48 @@ jobs:
                 # Get file info
                 FILE_SIZE=$(stat -f%z "$exe_file" 2>/dev/null || stat -c%s "$exe_file" 2>/dev/null)
                 FILE_HASH=$(sha256sum "$exe_file" | cut -d' ' -f1)
+                RELATIVE_PATH="${exe_file#extracted_files/}"
                 
                 # Scan dengan ClamAV
                 SCAN_RESULT=$(clamscan --no-summary "$exe_file" 2>&1)
                 
                 if echo "$SCAN_RESULT" | grep -q "FOUND"; then
-                  echo "⚠️ **INFECTED**: \`$exe_file\`" >> scan_reports/exe_report.md
+                  VIRUS_NAME=$(echo "$SCAN_RESULT" | grep "FOUND" | sed 's/.*: \(.*\) FOUND/\1/')
+                  
+                  echo "⚠️ **INFECTED**: \`$RELATIVE_PATH\`" >> scan_reports/exe_report.md
                   echo "  - Size: $FILE_SIZE bytes" >> scan_reports/exe_report.md
                   echo "  - SHA256: \`$FILE_HASH\`" >> scan_reports/exe_report.md
-                  echo "  - Detection: $(echo "$SCAN_RESULT" | grep "FOUND")" >> scan_reports/exe_report.md
+                  echo "  - Detection: **$VIRUS_NAME**" >> scan_reports/exe_report.md
                   echo "" >> scan_reports/exe_report.md
                   INFECTED=$((INFECTED + 1))
                   
-                  # Hapus file yang terinfeksi
-                  rm -f "$exe_file"
-                  echo "  - ✅ File removed" >> scan_reports/exe_report.md
+                  # OPSI: Pilih action untuk infected files
+                  ACTION="${{ github.event.inputs.infected_action }}"
+                  
+                  if [ "$ACTION" == "delete" ]; then
+                    # Hapus file yang terinfeksi
+                    rm -f "$exe_file"
+                    echo "  - ✅ Action: **DELETED**" >> scan_reports/exe_report.md
+                  elif [ "$ACTION" == "quarantine" ]; then
+                    # Pindah ke quarantine dengan password-protected zip
+                    QUARANTINE_DIR="quarantine_zone/$(dirname "$RELATIVE_PATH")"
+                    mkdir -p "$QUARANTINE_DIR"
+                    
+                    # Zip dengan password "infected" 
+                    zip -P infected -j "$QUARANTINE_DIR/$(basename "$exe_file").quarantine.zip" "$exe_file" > /dev/null 2>&1
+                    rm -f "$exe_file"
+                    
+                    echo "  - 🔒 Action: **QUARANTINED** (password: \`infected\`)" >> scan_reports/exe_report.md
+                    echo "  - Location: \`quarantine_zone/$RELATIVE_PATH.quarantine.zip\`" >> scan_reports/exe_report.md
+                  else
+                    # Default: rename dengan .VIRUS extension
+                    mv "$exe_file" "$exe_file.VIRUS"
+                    echo "  - ⚠️ Action: **RENAMED** to \`.VIRUS\` extension" >> scan_reports/exe_report.md
+                  fi
+                  
                   echo "" >> scan_reports/exe_report.md
                 else
-                  echo "✅ **CLEAN**: \`$exe_file\`" >> scan_reports/exe_report.md
+                  echo "✅ **CLEAN**: \`$RELATIVE_PATH\`" >> scan_reports/exe_report.md
                   echo "  - Size: $FILE_SIZE bytes" >> scan_reports/exe_report.md
                   echo "  - SHA256: \`$FILE_HASH\`" >> scan_reports/exe_report.md
                   echo "" >> scan_reports/exe_report.md
@@ -165,35 +199,80 @@ jobs:
             
             echo "" >> scan_reports/exe_report.md
             echo "### Summary" >> scan_reports/exe_report.md
-            echo "- 🦠 Infected files removed: $INFECTED" >> scan_reports/exe_report.md
+            echo "- 🦠 Infected files: $INFECTED" >> scan_reports/exe_report.md
             echo "- ✅ Clean files: $CLEAN" >> scan_reports/exe_report.md
             echo "- 📊 Total scanned: $EXE_COUNT" >> scan_reports/exe_report.md
             
-            # Tambahkan peringatan heuristic
+            # Tambahkan peringatan
             echo "" >> scan_reports/exe_report.md
-            echo "### ⚠️ Security Notice" >> scan_reports/exe_report.md
-            echo "- Files marked as CLEAN may still be potentially unwanted programs (PUPs)" >> scan_reports/exe_report.md
-            echo "- Always verify EXE files before running them" >> scan_reports/exe_report.md
-            echo "- Consider additional scanning with VirusTotal or other services" >> scan_reports/exe_report.md
+            echo "### ⚠️ CRITICAL SECURITY WARNING" >> scan_reports/exe_report.md
+            echo "" >> scan_reports/exe_report.md
+            echo "**DO NOT run any infected files, even from quarantine!**" >> scan_reports/exe_report.md
+            echo "" >> scan_reports/exe_report.md
+            echo "Infected files are dangerous and should only be:" >> scan_reports/exe_report.md
+            echo "- Analyzed by security professionals in isolated environments" >> scan_reports/exe_report.md
+            echo "- Used for malware research purposes only" >> scan_reports/exe_report.md
+            echo "- Handled with proper sandboxing (VM, isolated network)" >> scan_reports/exe_report.md
+            echo "" >> scan_reports/exe_report.md
+            echo "**Files marked as CLEAN may still be:**" >> scan_reports/exe_report.md
+            echo "- Potentially Unwanted Programs (PUPs)" >> scan_reports/exe_report.md
+            echo "- Zero-day malware not in virus database" >> scan_reports/exe_report.md
+            echo "- Packed/obfuscated malware" >> scan_reports/exe_report.md
+            echo "" >> scan_reports/exe_report.md
+            echo "**Recommended next steps:**" >> scan_reports/exe_report.md
+            echo "1. Upload SHA256 hashes to VirusTotal for multi-engine scan" >> scan_reports/exe_report.md
+            echo "2. Run files in sandbox environment (Any.run, Joe Sandbox)" >> scan_reports/exe_report.md
+            echo "3. Never run on production systems" >> scan_reports/exe_report.md
             
-            # Simpan hash untuk VirusTotal check (optional)
+            # Tambahkan guide untuk sandboxing
             echo "" >> scan_reports/exe_report.md
-            echo "### SHA256 Hashes for Manual Verification" >> scan_reports/exe_report.md
+            echo "### 🔬 Safe Analysis Options" >> scan_reports/exe_report.md
+            echo "" >> scan_reports/exe_report.md
+            echo "If you need to analyze these files:" >> scan_reports/exe_report.md
+            echo "" >> scan_reports/exe_report.md
+            echo "**Free Online Sandboxes:**" >> scan_reports/exe_report.md
+            echo "- [Any.run](https://any.run) - Interactive malware analysis" >> scan_reports/exe_report.md
+            echo "- [Hybrid Analysis](https://hybrid-analysis.com) - Free automated analysis" >> scan_reports/exe_report.md
+            echo "- [Joe Sandbox](https://www.joesandbox.com) - Deep malware analysis" >> scan_reports/exe_report.md
+            echo "" >> scan_reports/exe_report.md
+            echo "**Multi-Engine Scanning:**" >> scan_reports/exe_report.md
+            echo "- [VirusTotal](https://virustotal.com) - 70+ antivirus engines" >> scan_reports/exe_report.md
+            echo "- [MetaDefender](https://metadefender.opswat.com) - Multi-scanning platform" >> scan_reports/exe_report.md
+            
+            # Simpan hash untuk VirusTotal check
+            echo "" >> scan_reports/exe_report.md
+            echo "### 🔐 SHA256 Hashes for Verification" >> scan_reports/exe_report.md
+            echo "" >> scan_reports/exe_report.md
+            echo "Copy these hashes to VirusTotal for multi-engine scanning:" >> scan_reports/exe_report.md
+            echo "" >> scan_reports/exe_report.md
             echo "\`\`\`" >> scan_reports/exe_report.md
-            find extracted_files -type f -iname "*.exe" -exec sha256sum {} \; >> scan_reports/exe_report.md 2>/dev/null || true
+            find extracted_files -type f -iname "*.exe" -exec sha256sum {} \; 2>/dev/null | sed 's|extracted_files/||' >> scan_reports/exe_report.md || true
             echo "\`\`\`" >> scan_reports/exe_report.md
             
             # Tampilkan report
             cat scan_reports/exe_report.md
             
             # Buat warning file
-            echo "WARNING: This archive contained $EXE_COUNT executable files" > extracted_files/SECURITY_WARNING.txt
-            echo "Infected files removed: $INFECTED" >> extracted_files/SECURITY_WARNING.txt
-            echo "Clean files remaining: $CLEAN" >> extracted_files/SECURITY_WARNING.txt
+            echo "⚠️ SECURITY WARNING ⚠️" > extracted_files/SECURITY_WARNING.txt
             echo "" >> extracted_files/SECURITY_WARNING.txt
-            echo "See scan_reports/exe_report.md for details" >> extracted_files/SECURITY_WARNING.txt
+            echo "This archive contained $EXE_COUNT executable (.exe) files" >> extracted_files/SECURITY_WARNING.txt
+            echo "" >> extracted_files/SECURITY_WARNING.txt
+            echo "Scan Results:" >> extracted_files/SECURITY_WARNING.txt
+            echo "- Infected/Malicious: $INFECTED" >> extracted_files/SECURITY_WARNING.txt
+            echo "- Clean (verified): $CLEAN" >> extracted_files/SECURITY_WARNING.txt
+            echo "" >> extracted_files/SECURITY_WARNING.txt
+            echo "CRITICAL: Do NOT run any .exe files without proper verification!" >> extracted_files/SECURITY_WARNING.txt
+            echo "" >> extracted_files/SECURITY_WARNING.txt
+            echo "Infected files were: $ACTION" >> extracted_files/SECURITY_WARNING.txt
+            echo "" >> extracted_files/SECURITY_WARNING.txt
+            echo "For detailed scan report, see: scan_reports/exe_report.md" >> extracted_files/SECURITY_WARNING.txt
+            echo "" >> extracted_files/SECURITY_WARNING.txt
+            echo "Safe analysis options:" >> extracted_files/SECURITY_WARNING.txt
+            echo "1. Upload to VirusTotal.com for multi-engine scan" >> extracted_files/SECURITY_WARNING.txt
+            echo "2. Use online sandboxes (Any.run, Hybrid Analysis)" >> extracted_files/SECURITY_WARNING.txt
+            echo "3. Run in isolated VM with network monitoring" >> extracted_files/SECURITY_WARNING.txt
           else
-            echo "No EXE files found - Archive is clean"
+            echo "✅ No EXE files found - Archive is clean from executables"
           fi
           
       - name: Reverse rename all folders
@@ -262,6 +341,14 @@ jobs:
           name: extracted-files
           path: extracted_files/
           retention-days: 30
+          
+      - name: Upload quarantine zone (if exists)
+        uses: actions/upload-artifact@v4
+        if: hashFiles('quarantine_zone/**') != ''
+        with:
+          name: quarantine-zone-DO-NOT-OPEN
+          path: quarantine_zone/
+          retention-days: 7
           
       - name: Upload security scan report
         uses: actions/upload-artifact@v4
