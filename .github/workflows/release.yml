@@ -26,10 +26,16 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install extraction tools
+      - name: Install extraction and security tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y unzip unrar p7zip-full gzip bzip2 xz-utils
+          sudo apt-get install -y unzip unrar p7zip-full gzip bzip2 xz-utils clamav clamav-daemon
+          
+      - name: Update ClamAV virus definitions
+        run: |
+          sudo systemctl stop clamav-freshclam || true
+          sudo freshclam || true
+          echo "ClamAV updated"
 
       - name: Download archive
         run: |
@@ -92,6 +98,157 @@ jobs:
           echo "Extraction completed!"
           ls -lah extracted_files/
 
+      - name: Remove virus .url files
+        run: |
+          echo "Removing .url files (potential malware)..."
+          find extracted_files -type f -name "*.url" -delete
+          echo "Removed .url files"
+          
+      - name: Scan and handle EXE files
+        run: |
+          echo "Scanning for EXE files..."
+          
+          # Buat direktori untuk laporan
+          mkdir -p scan_reports
+          
+          # Temukan semua file EXE
+          find extracted_files -type f -iname "*.exe" > exe_list.txt
+          EXE_COUNT=$(wc -l < exe_list.txt)
+          
+          echo "Found $EXE_COUNT EXE files"
+          
+          if [ $EXE_COUNT -gt 0 ]; then
+            echo "## EXE Files Detection Report" > scan_reports/exe_report.md
+            echo "" >> scan_reports/exe_report.md
+            echo "Total EXE files found: $EXE_COUNT" >> scan_reports/exe_report.md
+            echo "" >> scan_reports/exe_report.md
+            
+            # Scan dengan ClamAV
+            echo "### Virus Scan Results (ClamAV)" >> scan_reports/exe_report.md
+            echo "" >> scan_reports/exe_report.md
+            
+            INFECTED=0
+            CLEAN=0
+            
+            while IFS= read -r exe_file; do
+              if [ -f "$exe_file" ]; then
+                echo "Scanning: $exe_file"
+                
+                # Get file info
+                FILE_SIZE=$(stat -f%z "$exe_file" 2>/dev/null || stat -c%s "$exe_file" 2>/dev/null)
+                FILE_HASH=$(sha256sum "$exe_file" | cut -d' ' -f1)
+                
+                # Scan dengan ClamAV
+                SCAN_RESULT=$(clamscan --no-summary "$exe_file" 2>&1)
+                
+                if echo "$SCAN_RESULT" | grep -q "FOUND"; then
+                  echo "⚠️ **INFECTED**: \`$exe_file\`" >> scan_reports/exe_report.md
+                  echo "  - Size: $FILE_SIZE bytes" >> scan_reports/exe_report.md
+                  echo "  - SHA256: \`$FILE_HASH\`" >> scan_reports/exe_report.md
+                  echo "  - Detection: $(echo "$SCAN_RESULT" | grep "FOUND")" >> scan_reports/exe_report.md
+                  echo "" >> scan_reports/exe_report.md
+                  INFECTED=$((INFECTED + 1))
+                  
+                  # Hapus file yang terinfeksi
+                  rm -f "$exe_file"
+                  echo "  - ✅ File removed" >> scan_reports/exe_report.md
+                  echo "" >> scan_reports/exe_report.md
+                else
+                  echo "✅ **CLEAN**: \`$exe_file\`" >> scan_reports/exe_report.md
+                  echo "  - Size: $FILE_SIZE bytes" >> scan_reports/exe_report.md
+                  echo "  - SHA256: \`$FILE_HASH\`" >> scan_reports/exe_report.md
+                  echo "" >> scan_reports/exe_report.md
+                  CLEAN=$((CLEAN + 1))
+                fi
+              fi
+            done < exe_list.txt
+            
+            echo "" >> scan_reports/exe_report.md
+            echo "### Summary" >> scan_reports/exe_report.md
+            echo "- 🦠 Infected files removed: $INFECTED" >> scan_reports/exe_report.md
+            echo "- ✅ Clean files: $CLEAN" >> scan_reports/exe_report.md
+            echo "- 📊 Total scanned: $EXE_COUNT" >> scan_reports/exe_report.md
+            
+            # Tambahkan peringatan heuristic
+            echo "" >> scan_reports/exe_report.md
+            echo "### ⚠️ Security Notice" >> scan_reports/exe_report.md
+            echo "- Files marked as CLEAN may still be potentially unwanted programs (PUPs)" >> scan_reports/exe_report.md
+            echo "- Always verify EXE files before running them" >> scan_reports/exe_report.md
+            echo "- Consider additional scanning with VirusTotal or other services" >> scan_reports/exe_report.md
+            
+            # Simpan hash untuk VirusTotal check (optional)
+            echo "" >> scan_reports/exe_report.md
+            echo "### SHA256 Hashes for Manual Verification" >> scan_reports/exe_report.md
+            echo "\`\`\`" >> scan_reports/exe_report.md
+            find extracted_files -type f -iname "*.exe" -exec sha256sum {} \; >> scan_reports/exe_report.md 2>/dev/null || true
+            echo "\`\`\`" >> scan_reports/exe_report.md
+            
+            # Tampilkan report
+            cat scan_reports/exe_report.md
+            
+            # Buat warning file
+            echo "WARNING: This archive contained $EXE_COUNT executable files" > extracted_files/SECURITY_WARNING.txt
+            echo "Infected files removed: $INFECTED" >> extracted_files/SECURITY_WARNING.txt
+            echo "Clean files remaining: $CLEAN" >> extracted_files/SECURITY_WARNING.txt
+            echo "" >> extracted_files/SECURITY_WARNING.txt
+            echo "See scan_reports/exe_report.md for details" >> extracted_files/SECURITY_WARNING.txt
+          else
+            echo "No EXE files found - Archive is clean"
+          fi
+          
+      - name: Reverse rename all folders
+        run: |
+          echo "Reversing folder names..."
+          # Script Python untuk reverse nama folder
+          cat > reverse_folders.py << 'EOF'
+          import os
+          import sys
+          
+          def reverse_string(s):
+              return s[::-1]
+          
+          def rename_folders_recursive(root_path):
+              renamed_count = 0
+              # Kumpulkan semua folder terlebih dahulu (dari yang terdalam)
+              all_dirs = []
+              for dirpath, dirnames, filenames in os.walk(root_path, topdown=False):
+                  for dirname in dirnames:
+                      full_path = os.path.join(dirpath, dirname)
+                      all_dirs.append(full_path)
+              
+              # Rename dari yang terdalam dulu
+              for old_path in all_dirs:
+                  parent_dir = os.path.dirname(old_path)
+                  old_name = os.path.basename(old_path)
+                  new_name = reverse_string(old_name)
+                  new_path = os.path.join(parent_dir, new_name)
+                  
+                  # Skip jika nama sama (palindrome)
+                  if old_name != new_name:
+                      try:
+                          # Jika target sudah ada, tambahkan suffix
+                          counter = 1
+                          temp_new_path = new_path
+                          while os.path.exists(temp_new_path):
+                              temp_new_path = f"{new_path}_{counter}"
+                              counter += 1
+                          
+                          os.rename(old_path, temp_new_path)
+                          print(f"Renamed: {old_name} -> {os.path.basename(temp_new_path)}")
+                          renamed_count += 1
+                      except Exception as e:
+                          print(f"Error renaming {old_path}: {e}")
+              
+              return renamed_count
+          
+          if __name__ == "__main__":
+              root = sys.argv[1] if len(sys.argv) > 1 else "."
+              count = rename_folders_recursive(root)
+              print(f"\nTotal folders renamed: {count}")
+          EOF
+          
+          python3 reverse_folders.py extracted_files
+          
       - name: Create archive of extracted files
         run: |
           cd extracted_files
@@ -105,6 +262,14 @@ jobs:
           name: extracted-files
           path: extracted_files/
           retention-days: 30
+          
+      - name: Upload security scan report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: security-scan-report
+          path: scan_reports/
+          retention-days: 90
 
       - name: Create Release
         uses: softprops/action-gh-release@v1
@@ -125,6 +290,7 @@ jobs:
           files: |
             extracted-files.zip
             extracted-files.tar.gz
+            scan_reports/exe_report.md
           draft: false
           prerelease: false
         env:
@@ -136,8 +302,24 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "✅ Successfully extracted files from: ${{ github.event.inputs.download_url }}" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Files extracted:" >> $GITHUB_STEP_SUMMARY
+          echo "### 🛡️ Security Actions:" >> $GITHUB_STEP_SUMMARY
+          echo "- Removed all .url files (potential malware)" >> $GITHUB_STEP_SUMMARY
+          echo "- Scanned all EXE files with ClamAV antivirus" >> $GITHUB_STEP_SUMMARY
+          echo "- Removed infected EXE files automatically" >> $GITHUB_STEP_SUMMARY
+          echo "- Reversed all folder names" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          # Tambahkan info EXE scan jika ada
+          if [ -f scan_reports/exe_report.md ]; then
+            echo "### 🦠 EXE Scan Results:" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            cat scan_reports/exe_report.md >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          echo "### 📁 Files extracted:" >> $GITHUB_STEP_SUMMARY
           find extracted_files -type f | head -20 >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "📦 Total files: $(find extracted_files -type f | wc -l)" >> $GITHUB_STEP_SUMMARY
+          echo "📁 Total folders: $(find extracted_files -type d | wc -l)" >> $GITHUB_STEP_SUMMARY
           echo "💾 Total size: $(du -sh extracted_files | cut -f1)" >> $GITHUB_STEP_SUMMARY
